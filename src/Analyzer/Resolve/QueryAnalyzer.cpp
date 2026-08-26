@@ -6949,6 +6949,14 @@ void QueryAnalyzer::resolveUnion(const QueryTreeNodePtr & union_node, Identifier
 
     if (recursive_cte_table && isStorageUsedInTree(recursive_cte_table->storage, union_node.get()))
     {
+        /// Self-reference is proven only here: the CTE is genuinely recursive, and the recursive
+        /// evaluation itself cannot be materialized. Non-recursive `MATERIALIZED` helpers declared
+        /// in the same `WITH RECURSIVE` never reach this point and are allowed.
+        if (union_node_typed.isMaterialized())
+            throw Exception(ErrorCodes::UNSUPPORTED_METHOD,
+                "Recursive CTE {} cannot be MATERIALIZED",
+                union_node_typed.getCTEName());
+
         if (union_node_typed.getUnionMode() != SelectUnionMode::UNION_ALL)
             throw Exception(ErrorCodes::UNSUPPORTED_METHOD,
             "Recursive CTE subquery {} with {} union mode is unsupported, only UNION ALL union mode is supported",

@@ -346,14 +346,8 @@ QueryTreeNodePtr QueryTreeBuilder::buildSelectExpression(
             {
                 auto * with_union_node = with_node->as<UnionNode>();
 
-                /// Union-shaped CTEs are speculatively marked recursive below, and the recursive
-                /// evaluation cannot itself be materialized. Plain SELECT CTEs can never be
-                /// recursive, so MATERIALIZED is allowed for them: they are materialized once and
-                /// every recursive step reads the snapshot instead of re-evaluating the subquery
-                /// per step.
-                if (with_union_node && with_union_node->isMaterialized())
-                    throw Exception(ErrorCodes::UNSUPPORTED_METHOD, "MATERIALIZED is not supported for the recursive CTE itself in recursive WITH");
-
+                /// Union-shaped CTEs are only candidates for recursion here. Whether a CTE actually references
+                /// itself (and therefore cannot be `MATERIALIZED`) is determined later in `QueryAnalyzer::resolveUnion`.
                 if (!with_union_node)
                     continue;
 
