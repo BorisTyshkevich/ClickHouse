@@ -64,6 +64,33 @@ filtered AS MATERIALIZED (SELECT n FROM base WHERE n % 2 = 0),
 walk AS (SELECT toUInt64(0) AS x UNION ALL SELECT x + 2 FROM walk INNER JOIN filtered ON filtered.n = walk.x + 2 WHERE x < 4)
 SELECT * FROM walk ORDER BY x;
 
+-- G. Recursive CTE with two recursive `UNION ALL` branches: the helper is referenced from
+--    both, is materialized exactly once, and every branch and iteration reads the same value.
+SELECT count() FROM (
+    EXPLAIN
+    WITH RECURSIVE helper AS MATERIALIZED (SELECT rand() AS r),
+    walk AS
+    (
+        SELECT toUInt64(0) AS n, toUInt32(0) AS r
+        UNION ALL
+        SELECT n + 1, helper.r FROM walk CROSS JOIN helper WHERE n < 2
+        UNION ALL
+        SELECT n + 10, helper.r FROM walk CROSS JOIN helper WHERE n = 0
+    )
+    SELECT * FROM walk
+) WHERE explain LIKE '%MaterializingCTE (Materializing CTE: helper)%';
+
+WITH RECURSIVE helper AS MATERIALIZED (SELECT rand() AS r),
+walk AS
+(
+    SELECT toUInt64(0) AS n, toUInt32(0) AS r
+    UNION ALL
+    SELECT n + 1, helper.r FROM walk CROSS JOIN helper WHERE n < 2
+    UNION ALL
+    SELECT n + 10, helper.r FROM walk CROSS JOIN helper WHERE n = 0
+)
+SELECT uniqExactIf(r, n > 0), groupArraySorted(10)(n) FROM walk;
+
 -- F. Negative: a CTE that refers to its own output cannot be `MATERIALIZED`, regardless
 --    of the `enable_materialized_cte` setting.
 WITH RECURSIVE bad AS MATERIALIZED (SELECT 1 AS x UNION ALL SELECT x + 1 FROM bad WHERE x < 3) SELECT * FROM bad; -- { serverError UNSUPPORTED_METHOD }
