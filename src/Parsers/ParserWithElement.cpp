@@ -252,11 +252,32 @@ SELECT count() FROM b AS l LEFT SEMI JOIN b AS r ON l.uid = r.uid;
 └─────────┘
 ```
 
+**Example 4:** Materialized helper in a recursive query
+
+```sql
+SET enable_materialized_cte = 1;
+
+WITH RECURSIVE
+    allowed_nodes AS MATERIALIZED (SELECT id FROM nodes WHERE enabled),
+    walk AS
+    (
+        SELECT 1 AS id
+        UNION ALL
+        SELECT edges.to
+        FROM walk
+        INNER JOIN edges ON edges.from = walk.id
+        INNER JOIN allowed_nodes ON allowed_nodes.id = edges.to
+    )
+SELECT * FROM walk;
+```
+
+`allowed_nodes` is evaluated once; each recursive step joins against the stored result instead of re-running the filter.
+
 ### Restrictions {#materialized-cte-restrictions}
 
 - **Experimental setting required**: The setting `enable_materialized_cte` must be enabled.
 - **Analyzer required**: Materialized CTEs only work with the [analyzer](/guides/clickhouse/performance-and-monitoring/analyzer) enabled (`enable_analyzer = 1`).
-- **Not supported with `RECURSIVE`**: Combining `MATERIALIZED` and `RECURSIVE` keywords is not allowed and results in an `UNSUPPORTED_METHOD` exception.
+- **Recursive CTEs cannot themselves be materialized**: a CTE that refers to its own output in a `WITH RECURSIVE` query cannot use `MATERIALIZED` and results in an `UNSUPPORTED_METHOD` exception. Non-recursive helper CTEs declared in the same `WITH RECURSIVE` clause may be materialized: such a helper is materialized once and every recursive iteration reads the same temporary result, even if the helper is referenced only once inside the recursive term.
 - **Correlated CTEs are forbidden**: A materialized CTE cannot reference columns from outer query scopes.
 
 ## Common Scalar Expressions {#common-scalar-expressions}
