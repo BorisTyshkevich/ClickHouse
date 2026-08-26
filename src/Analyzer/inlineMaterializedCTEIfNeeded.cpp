@@ -4,6 +4,7 @@
 #include <unordered_set>
 
 #include <Analyzer/TableNode.h>
+#include <Analyzer/UnionNode.h>
 #include <Analyzer/InDepthQueryTreeVisitor.h>
 #include <Analyzer/traverseQueryTree.h>
 #include <Analyzer/Utils.h>
@@ -122,6 +123,53 @@ MaterializedCTEUseCount mergeDuplicateMaterializedCTEs(const QueryTreeNodePtr & 
     return use_count;
 }
 
+/// Collect materialized CTEs referenced from inside the recursive term of an actually recursive CTE.
+/// `RecursiveCTESource` re-executes `queries[1..]` of a recursive `UnionNode` once per recursion step, so a
+/// materialized CTE referenced there is reused at runtime even if it is referenced only once syntactically
+/// and must not be inlined. `queries[0]` (the seed) runs once and is treated like ordinary context.
+///
+/// Must run after `mergeDuplicateMaterializedCTEs`, which canonicalizes duplicate `MaterializedCTEPtr`s via
+/// `adoptMaterializedCTE` -- collecting before that would capture stale pointers.
+void collectMaterializedCTEsUsedInRecursiveTerms(const QueryTreeNodePtr & node, bool inside_recursive_term, ReusedMaterializedCTEs & result)
+{
+    if (!node)
+        return;
+
+    if (auto * table_node = node->as<TableNode>())
+    {
+        /// See the comment in `mergeDuplicateMaterializedCTEs`: a `TableNode` with `getMaterializedCTE()` but
+        /// without `isMaterializedCTE()` is not a CTE reference site and must be ignored.
+        if (table_node->isMaterializedCTE())
+        {
+            if (inside_recursive_term)
+                result.insert(table_node->getMaterializedCTE());
+
+            /// The materialized CTE's own subquery is evaluated once during materialization, not once per
+            /// recursion step -- but it may itself contain a recursive CTE with its own helpers.
+            for (const auto & child : table_node->getChildren())
+                collectMaterializedCTEsUsedInRecursiveTerms(child, false /*inside_recursive_term*/, result);
+            return;
+        }
+    }
+    else if (auto * union_node = node->as<UnionNode>())
+    {
+        if (union_node->hasRecursiveCTETable())
+        {
+            const auto & queries = union_node->getQueries().getNodes();
+            for (size_t i = 0; i < queries.size(); ++i)
+                collectMaterializedCTEsUsedInRecursiveTerms(queries[i], i == 0 ? inside_recursive_term : true, result);
+
+            for (const auto & child : union_node->getChildren())
+                if (child != union_node->getQueriesNode())
+                    collectMaterializedCTEsUsedInRecursiveTerms(child, inside_recursive_term, result);
+            return;
+        }
+    }
+
+    for (const auto & child : node->getChildren())
+        collectMaterializedCTEsUsedInRecursiveTerms(child, inside_recursive_term, result);
+}
+
 class InlineMaterializedCTEsVisitor : public InDepthQueryTreeVisitorWithContext<InlineMaterializedCTEsVisitor>
 {
     using Base = InDepthQueryTreeVisitorWithContext<InlineMaterializedCTEsVisitor>;
@@ -178,6 +226,8 @@ void inlineMaterializedCTEIfNeeded(QueryTreeNodePtr & node, ContextPtr context)
     for (const auto & [materialized_cte, count] : use_count)
         if (count >= 2)
             reused_materialized_cte.insert(materialized_cte);
+
+    collectMaterializedCTEsUsedInRecursiveTerms(node, false /*inside_recursive_term*/, reused_materialized_cte);
 
     if (context->hasQueryContext())
     {
